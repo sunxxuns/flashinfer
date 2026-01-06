@@ -17,28 +17,46 @@
 #pragma once
 
 #include <assert.h>
+
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#if ENABLE_BF16
+// Use amd_hip_bf16.h for __hip_bfloat16 and __hip_bfloat162 types
+#include <hip/amd_detail/amd_hip_bf16.h>
+#endif
+// HIP compatibility aliases
+using nv_bfloat16 = __hip_bfloat16;
+using __nv_bfloat16 = __hip_bfloat16;
+using __nv_bfloat162 = __hip_bfloat162;
+#else
 #include <cuda.h>
 #include <cuda_fp16.h>
+#if ENABLE_BF16
+#include <cuda_bf16.h>
+#endif
+#endif
 
 #include "flashinfer/trtllm/common/cudaBf16Fallbacks.cuh"
 #include "flashinfer/trtllm/common/cudaBf16Wrapper.h"
 #include "flashinfer/trtllm/common/cudaFp8Utils.h"
-#if ENABLE_BF16
-#include <cuda_bf16.h>
-#endif
 
 namespace tensorrt_llm {
 namespace common {
 
 template <typename T>
 inline __device__ T ldg(T const* val) {
+#ifdef __HIP_PLATFORM_AMD__
+  return val[0];  // HIP __ldg has limited type support
+#else
   return __ldg(val);
+#endif
 }
 
 #if ENABLE_BF16
 template <>
 inline __device__ __nv_bfloat162 ldg(__nv_bfloat162 const* val) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+#if defined(__HIP_PLATFORM_AMD__) || (defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800)
   return val[0];
 #else
   return __ldg(val);
@@ -47,7 +65,7 @@ inline __device__ __nv_bfloat162 ldg(__nv_bfloat162 const* val) {
 
 template <>
 inline __device__ __nv_bfloat16 ldg(__nv_bfloat16 const* val) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+#if defined(__HIP_PLATFORM_AMD__) || (defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800)
   return val[0];
 #else
   return __ldg(val);
@@ -286,6 +304,13 @@ __device__ inline half2 cuda_cast<half2, half>(half val) {
 
 template <>
 __device__ inline int8_t cuda_cast<int8_t, half>(half val) {
+#ifdef __HIP_PLATFORM_AMD__
+  // HIP: convert half to int8 with rounding and saturation
+  float f = __half2float(val);
+  f = rintf(f);
+  f = fminf(fmaxf(f, -128.f), 127.f);
+  return static_cast<int8_t>(f);
+#else
   union {
     int8_t int8[2];
     int16_t int16;
@@ -299,6 +324,7 @@ __device__ inline int8_t cuda_cast<int8_t, half>(half val) {
   fp16 = val;
   asm volatile("cvt.rni.sat.s8.f16 %0, %1;" : "=h"(int16) : "h"(int16_in));
   return int8[0];
+#endif
 }
 
 template <>
@@ -315,6 +341,12 @@ __device__ inline int16_t cuda_cast<int16_t, half2>(half2 val) {
 
 template <>
 __device__ inline int8_t cuda_cast<int8_t, float>(float val) {
+#ifdef __HIP_PLATFORM_AMD__
+  // HIP: convert float to int8 with rounding and saturation
+  float f = rintf(val);
+  f = fminf(fmaxf(f, -128.f), 127.f);
+  return static_cast<int8_t>(f);
+#else
   union {
     int8_t int8[2];
     int16_t int16;
@@ -322,6 +354,7 @@ __device__ inline int8_t cuda_cast<int8_t, float>(float val) {
 
   asm volatile("cvt.rni.sat.s8.f32 %0, %1;" : "=h"(int16) : "f"(val));
   return int8[0];
+#endif
 }
 
 template <>
@@ -511,7 +544,10 @@ __device__ inline half cuda_max(half2 val) {
 #ifdef ENABLE_BF16
 template <>
 __device__ inline __nv_bfloat16 cuda_max(__nv_bfloat162 val) {
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
+#ifdef __HIP_PLATFORM_AMD__
+  // HIP: manual bfloat16 max
+  return (__bfloat162float(val.x) > __bfloat162float(val.y)) ? val.x : val.y;
+#elif (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
   return __hmax(val.x, val.y);
 #else
   assert(0);
@@ -537,13 +573,29 @@ __device__ inline float2 cuda_max(float2 val1, float2 val2) {
 
 template <>
 __device__ inline half2 cuda_max(half2 val1, half2 val2) {
+#ifdef __HIP_PLATFORM_AMD__
+  // HIP's __hmax2 is for bfloat162, use manual half2 max
+  half2 result;
+  result.x = (__half2float(val1.x) > __half2float(val2.x)) ? val1.x : val2.x;
+  result.y = (__half2float(val1.y) > __half2float(val2.y)) ? val1.y : val2.y;
+  return result;
+#else
   return __hmax2(val1, val2);
+#endif
 }
 
 #ifdef ENABLE_BF16
 template <>
 __device__ inline __nv_bfloat162 cuda_max(__nv_bfloat162 val1, __nv_bfloat162 val2) {
+#ifdef __HIP_PLATFORM_AMD__
+  // HIP: manual bfloat162 max
+  __nv_bfloat162 result;
+  result.x = (__bfloat162float(val1.x) > __bfloat162float(val2.x)) ? val1.x : val2.x;
+  result.y = (__bfloat162float(val1.y) > __bfloat162float(val2.y)) ? val1.y : val2.y;
+  return result;
+#else
   return __hmax2(val1, val2);
+#endif
 }
 #endif  // ENABLE_BF16
 
@@ -563,13 +615,29 @@ __device__ inline float2 cuda_min(float2 val1, float2 val2) {
 
 template <>
 __device__ inline half2 cuda_min(half2 val1, half2 val2) {
+#ifdef __HIP_PLATFORM_AMD__
+  // HIP's __hmin2 is for bfloat162, use manual half2 min
+  half2 result;
+  result.x = (__half2float(val1.x) < __half2float(val2.x)) ? val1.x : val2.x;
+  result.y = (__half2float(val1.y) < __half2float(val2.y)) ? val1.y : val2.y;
+  return result;
+#else
   return __hmin2(val1, val2);
+#endif
 }
 
 #ifdef ENABLE_BF16
 template <>
 __device__ inline __nv_bfloat162 cuda_min(__nv_bfloat162 val1, __nv_bfloat162 val2) {
+#ifdef __HIP_PLATFORM_AMD__
+  // HIP: manual bfloat162 min
+  __nv_bfloat162 result;
+  result.x = (__bfloat162float(val1.x) < __bfloat162float(val2.x)) ? val1.x : val2.x;
+  result.y = (__bfloat162float(val1.y) < __bfloat162float(val2.y)) ? val1.y : val2.y;
+  return result;
+#else
   return __hmin2(val1, val2);
+#endif
 }
 #endif  // ENABLE_BF16
 
@@ -580,6 +648,8 @@ inline __device__ T cuda_clamp(T val, T minVal, T maxVal) {
 }
 
 #ifdef ENABLE_FP8
+#ifndef __HIP_PLATFORM_AMD__
+// FP8x2 conversions - CUDA only (HIP has limited FP8 packed type support)
 template <>
 __device__ inline float2 cuda_cast<float2, __nv_fp8x2_e4m3>(__nv_fp8x2_e4m3 val) {
   return bf1622float2(fp8x2_e4m3_to_bfloat2(&val));
@@ -604,6 +674,7 @@ template <>
 __device__ inline __nv_fp8x2_e4m3 cuda_cast<__nv_fp8x2_e4m3, __nv_bfloat162>(__nv_bfloat162 val) {
   return __nv_fp8x2_e4m3(cuda_cast<float2>(val));
 }
+#endif  // !__HIP_PLATFORM_AMD__
 
 template <>
 __device__ inline __nv_fp8_e4m3 cuda_cast<__nv_fp8_e4m3, half>(half val) {

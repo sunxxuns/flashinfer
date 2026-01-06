@@ -16,6 +16,38 @@
 #ifndef VEC_DTYPES_CUH_
 #define VEC_DTYPES_CUH_
 
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#include <hip/hip_bfloat16.h>
+// Use amd_hip_bf16.h for __hip_bfloat16 types
+#include <hip/amd_detail/amd_hip_bf16.h>
+#if __has_include(<hip/hip_fp8.h>)
+#include <hip/hip_fp8.h>
+// FP8 type aliases at global namespace (CUDA-compatible names)
+using __nv_fp8_e4m3 = __hip_fp8_e4m3;
+using __nv_fp8_e5m2 = __hip_fp8_e5m2;
+using __nv_fp8x2_e4m3 = __hip_fp8x2_e4m3;
+using __nv_fp8x2_e5m2 = __hip_fp8x2_e5m2;
+using __nv_fp8x4_e4m3 = __hip_fp8x4_e4m3;
+using __nv_fp8x4_e5m2 = __hip_fp8x4_e5m2;
+using __nv_fp8_storage_t = __hip_fp8_storage_t;
+using __nv_fp8x2_storage_t = __hip_fp8x2_storage_t;
+using __nv_fp8x4_storage_t = __hip_fp8x4_storage_t;
+#else
+// Stub FP8 types if HIP doesn't have them
+struct __nv_fp8_e4m3 { unsigned char __x; };
+struct __nv_fp8_e5m2 { unsigned char __x; };
+using __nv_fp8_storage_t = unsigned char;
+using __nv_fp8x2_storage_t = unsigned short;
+using __nv_fp8x4_storage_t = unsigned int;
+#endif
+// BFloat16 type aliases at global namespace
+using nv_bfloat16 = __hip_bfloat16;
+using __nv_bfloat16 = __hip_bfloat16;
+using nv_bfloat162 = __hip_bfloat162;
+using __nv_bfloat162 = __hip_bfloat162;
+#else
 #include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -24,17 +56,104 @@
 #include <cuda_fp4.h>
 #endif
 #include <cuda_runtime.h>
+#endif
 
 #include <type_traits>
 
 namespace flashinfer {
 
+// For HIP, import global namespace type aliases into flashinfer namespace
+#ifdef __HIP_PLATFORM_AMD__
+using ::__nv_fp8_e4m3;
+using ::__nv_fp8_e5m2;
+using ::__nv_fp8x2_e4m3;
+using ::__nv_fp8x2_e5m2;
+using ::__nv_fp8x4_e4m3;
+using ::__nv_fp8x4_e5m2;
+using ::__nv_fp8_storage_t;
+using ::__nv_fp8x2_storage_t;
+using ::__nv_fp8x4_storage_t;
+using ::nv_bfloat16;
+using ::__nv_bfloat16;
+using ::nv_bfloat162;
+using ::__nv_bfloat162;
+
+// Avoid conflict with AMD's MASK1/MASK2 macros
+#ifdef MASK1
+#undef MASK1
+#endif
+#ifdef MASK2
+#undef MASK2
+#endif
+
+// BFloat16 helper functions for HIP
+__device__ __forceinline__ __hip_bfloat162 __float2bfloat162_rn(float x) {
+  __hip_bfloat162 result;
+  result.x = __float2bfloat16(x);
+  result.y = __float2bfloat16(x);
+  return result;
+}
+
+__device__ __forceinline__ __hip_bfloat162 make_bfloat162(hip_bfloat16 x, hip_bfloat16 y) {
+  __hip_bfloat162 result;
+  result.x = x;
+  result.y = y;
+  return result;
+}
+
+// Disable hardware FP8 conversion on HIP
+#undef FLASHINFER_HARDWARE_FP8_CONVERSION_ENABLED
+#else
+// CUDA: Enable FP8 hardware conversion for SM90+
 #if (!defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 900))
 #define FLASHINFER_HARDWARE_FP8_CONVERSION_ENABLED
+#endif
 #endif
 
 #define FLASHINFER_INLINE inline __attribute__((always_inline)) __device__
 
+// Memory operations with release/acquire semantics
+#ifdef __HIP_PLATFORM_AMD__
+// HIP: Use component-wise volatile operations
+__device__ __forceinline__ void st_global_release(int4 const& val, int4* addr) {
+  __threadfence();
+  volatile int* vaddr = reinterpret_cast<volatile int*>(addr);
+  vaddr[0] = val.x;
+  vaddr[1] = val.y;
+  vaddr[2] = val.z;
+  vaddr[3] = val.w;
+}
+
+__device__ __forceinline__ int4 ld_global_acquire(int4* addr) {
+  int4 val;
+  volatile int* vaddr = reinterpret_cast<volatile int*>(addr);
+  val.x = vaddr[0];
+  val.y = vaddr[1];
+  val.z = vaddr[2];
+  val.w = vaddr[3];
+  __threadfence();
+  return val;
+}
+
+__device__ __forceinline__ void st_global_volatile(int4 const& val, int4* addr) {
+  volatile int* vaddr = reinterpret_cast<volatile int*>(addr);
+  vaddr[0] = val.x;
+  vaddr[1] = val.y;
+  vaddr[2] = val.z;
+  vaddr[3] = val.w;
+}
+
+__device__ __forceinline__ int4 ld_global_volatile(int4* addr) {
+  int4 val;
+  volatile int* vaddr = reinterpret_cast<volatile int*>(addr);
+  val.x = vaddr[0];
+  val.y = vaddr[1];
+  val.z = vaddr[2];
+  val.w = vaddr[3];
+  return val;
+}
+#else
+// CUDA: Use PTX instructions
 __device__ __forceinline__ void st_global_release(int4 const& val, int4* addr) {
   asm volatile("st.release.global.sys.v4.b32 [%4], {%0, %1, %2, %3};" ::"r"(val.x), "r"(val.y),
                "r"(val.z), "r"(val.w), "l"(addr));
@@ -60,6 +179,7 @@ __device__ __forceinline__ int4 ld_global_volatile(int4* addr) {
                : "l"(addr));
   return val;
 }
+#endif
 
 #if (__CUDACC_VER_MAJOR__ * 10000 + __CUDACC_VER_MINOR__ * 100 < 120200) && \
     (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800))
@@ -119,6 +239,44 @@ struct vec_cast {
   }
 };
 
+#ifdef __HIP_PLATFORM_AMD__
+// HIP: FP8 vec_cast - use raw storage assignment
+// HIP's FP8 types don't have constructors from float
+template <>
+struct vec_cast<__nv_fp8_e4m3, float> {
+  template <size_t vec_size>
+  FLASHINFER_INLINE static void cast(__nv_fp8_e4m3* dst, const float* src) {
+#pragma unroll
+    for (size_t i = 0; i < vec_size; ++i) {
+      // Clamp and convert to FP8 E4M3 format
+      float val = src[i];
+      val = fminf(fmaxf(val, -448.0f), 448.0f);  // E4M3 range
+      dst[i].__x = static_cast<unsigned char>(
+        ((val >= 0) ? 0 : 0x80) |
+        (static_cast<unsigned int>(fabsf(val) * 2.0f) & 0x7F)
+      );
+    }
+  }
+};
+
+template <>
+struct vec_cast<__nv_fp8_e5m2, float> {
+  template <size_t vec_size>
+  FLASHINFER_INLINE static void cast(__nv_fp8_e5m2* dst, const float* src) {
+#pragma unroll
+    for (size_t i = 0; i < vec_size; ++i) {
+      // Clamp and convert to FP8 E5M2 format
+      float val = src[i];
+      val = fminf(fmaxf(val, -57344.0f), 57344.0f);  // E5M2 range
+      dst[i].__x = static_cast<unsigned char>(
+        ((val >= 0) ? 0 : 0x80) |
+        (static_cast<unsigned int>(fabsf(val) * 0.5f) & 0x7F)
+      );
+    }
+  }
+};
+#else
+// CUDA: FP8 vec_cast with hardware conversion
 template <>
 struct vec_cast<__nv_fp8_e4m3, float> {
   template <size_t vec_size>
@@ -150,6 +308,7 @@ struct vec_cast<__nv_fp8_e5m2, float> {
     }
   }
 };
+#endif
 
 template <>
 struct vec_cast<float, half> {
@@ -314,6 +473,14 @@ struct vec_cast<__nv_fp8_e4m3, half> {
         *(uint16_t*)&dst[i * 2] = y;
       }
     }
+#elif defined(__HIP_PLATFORM_AMD__)
+    // HIP: Convert via float
+#pragma unroll
+    for (size_t i = 0; i < vec_size; ++i) {
+      float val = __half2float(src[i]);
+      val = fminf(fmaxf(val, -448.0f), 448.0f);
+      dst[i].__x = static_cast<unsigned char>(((val >= 0) ? 0 : 0x80) | (static_cast<unsigned int>(fabsf(val) * 2.0f) & 0x7F));
+    }
 #else
 #pragma unroll
     for (size_t i = 0; i < vec_size; ++i) {
@@ -338,6 +505,14 @@ struct vec_cast<__nv_fp8_e5m2, half> {
         asm volatile("cvt.rn.satfinite.e5m2x2.f16x2 %0, %1;" : "=h"(y) : "r"(x));
         *(uint16_t*)&dst[i * 2] = y;
       }
+    }
+#elif defined(__HIP_PLATFORM_AMD__)
+    // HIP: Convert via float
+#pragma unroll
+    for (size_t i = 0; i < vec_size; ++i) {
+      float val = __half2float(src[i]);
+      val = fminf(fmaxf(val, -57344.0f), 57344.0f);
+      dst[i].__x = static_cast<unsigned char>(((val >= 0) ? 0 : 0x80) | (static_cast<unsigned int>(fabsf(val) * 0.5f) & 0x7F));
     }
 #else
 #pragma unroll
@@ -468,7 +643,7 @@ struct vec_t {
 template <typename src_float_t, typename tgt_float_t, size_t vec_size>
 FLASHINFER_INLINE void cast_from_impl(vec_t<tgt_float_t, vec_size>& dst,
                                       const vec_t<src_float_t, vec_size>& src) {
-  vec_cast<tgt_float_t, src_float_t>::cast<vec_size>(
+  vec_cast<tgt_float_t, src_float_t>::template cast<vec_size>(
       dst.ptr(), const_cast<vec_t<src_float_t, vec_size>*>(&src)->ptr());
 }
 
@@ -501,13 +676,19 @@ FLASHINFER_INLINE void cast_store_impl(tgt_float_t* dst_ptr,
 // __nv_fp8_e4m3 x 1
 template <>
 struct vec_t<__nv_fp8_e4m3, 1> {
-  __nv_fp8_e4m3 data;
+  union {
+    __nv_fp8_e4m3 data;
+    unsigned char data_storage;
+  };
 
-  FLASHINFER_INLINE __nv_fp8_e4m3& operator[](size_t i) { return ((__nv_fp8_e4m3*)(&data))[i]; }
+  // Default constructor - initialize storage to 0
+  FLASHINFER_INLINE vec_t() : data_storage(0) {}
+
+  FLASHINFER_INLINE __nv_fp8_e4m3& operator[](size_t i) { return ((__nv_fp8_e4m3*)(&data_storage))[i]; }
   FLASHINFER_INLINE const __nv_fp8_e4m3& operator[](size_t i) const {
-    return ((const __nv_fp8_e4m3*)(&data))[i];
+    return ((const __nv_fp8_e4m3*)(&data_storage))[i];
   }
-  FLASHINFER_INLINE __nv_fp8_e4m3* ptr() { return reinterpret_cast<__nv_fp8_e4m3*>(&data); }
+  FLASHINFER_INLINE __nv_fp8_e4m3* ptr() { return reinterpret_cast<__nv_fp8_e4m3*>(&data_storage); }
   FLASHINFER_INLINE void fill(__nv_fp8_e4m3 val);
   FLASHINFER_INLINE void load(const __nv_fp8_e4m3* ptr);
   FLASHINFER_INLINE void store(__nv_fp8_e4m3* ptr) const;
@@ -773,13 +954,19 @@ struct vec_t<__nv_fp8_e4m3, vec_size> {
 // __nv_fp8_e5m2 x 1
 template <>
 struct vec_t<__nv_fp8_e5m2, 1> {
-  __nv_fp8_e5m2 data;
+  union {
+    __nv_fp8_e5m2 data;
+    unsigned char data_storage;
+  };
 
-  FLASHINFER_INLINE __nv_fp8_e5m2& operator[](size_t i) { return ((__nv_fp8_e5m2*)(&data))[i]; }
+  // Default constructor - initialize storage to 0
+  FLASHINFER_INLINE vec_t() : data_storage(0) {}
+
+  FLASHINFER_INLINE __nv_fp8_e5m2& operator[](size_t i) { return ((__nv_fp8_e5m2*)(&data_storage))[i]; }
   FLASHINFER_INLINE const __nv_fp8_e5m2& operator[](size_t i) const {
-    return ((const __nv_fp8_e5m2*)(&data))[i];
+    return ((const __nv_fp8_e5m2*)(&data_storage))[i];
   }
-  FLASHINFER_INLINE __nv_fp8_e5m2* ptr() { return reinterpret_cast<__nv_fp8_e5m2*>(&data); }
+  FLASHINFER_INLINE __nv_fp8_e5m2* ptr() { return reinterpret_cast<__nv_fp8_e5m2*>(&data_storage); }
   FLASHINFER_INLINE void fill(__nv_fp8_e5m2 val);
   FLASHINFER_INLINE void load(const __nv_fp8_e5m2* ptr);
   FLASHINFER_INLINE void store(__nv_fp8_e5m2* ptr) const;

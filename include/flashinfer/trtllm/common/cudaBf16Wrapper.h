@@ -17,5 +17,10 @@
 #pragma once
 
 #ifdef ENABLE_BF16
+#ifdef __HIP_PLATFORM_AMD__
+// Use amd_hip_bf16.h for __hip_bfloat16 and __hip_bfloat162 types
+#include <hip/amd_detail/amd_hip_bf16.h>
+#else
 #include <cuda_bf16.h>
+#endif
 #endif

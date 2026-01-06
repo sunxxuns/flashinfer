@@ -16,6 +16,12 @@
 #ifndef FLASHINFER_LAYOUT_CUH_
 #define FLASHINFER_LAYOUT_CUH_
 
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+#else
+#include <cuda_runtime.h>
+#endif
+
 #include <cstdint>
 #include <string>
 #include <tuple>

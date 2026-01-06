@@ -18,8 +18,54 @@
 #include <tvm/ffi/dtype.h>
 #include <tvm/ffi/error.h>
 #include <tvm/ffi/extra/c_env_api.h>
-#include <tvm/ffi/extra/cuda/device_guard.h>
 #include <tvm/ffi/function.h>
+
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+// Use amd_hip_bf16.h for __hip_bfloat16 type
+#include <hip/amd_detail/amd_hip_bf16.h>
+// Include HIP FP8 if available
+#if __has_include(<hip/hip_fp8.h>)
+#include <hip/hip_fp8.h>
+// FP8 type aliases for CUDA compatibility
+using __nv_fp8_e4m3 = __hip_fp8_e4m3;
+using __nv_fp8_e5m2 = __hip_fp8_e5m2;
+#endif
+// Provide CUDA-like type aliases for HIP
+using cudaStream_t = hipStream_t;
+using cudaError_t = hipError_t;
+using nv_half = __half;
+using nv_bfloat16 = __hip_bfloat16;
+#define cudaGetDevice hipGetDevice
+#define cudaSetDevice hipSetDevice
+#define cudaSuccess hipSuccess
+#define kDLCUDA kDLROCM
+
+// HIP Device Guard - equivalent to ffi::CUDADeviceGuard
+namespace tvm {
+namespace ffi {
+class CUDADeviceGuard {
+ public:
+  explicit CUDADeviceGuard(int device_id) : prev_device_(-1) {
+    hipGetDevice(&prev_device_);
+    if (prev_device_ != device_id) {
+      hipSetDevice(device_id);
+    }
+  }
+  ~CUDADeviceGuard() {
+    if (prev_device_ >= 0) {
+      hipSetDevice(prev_device_);
+    }
+  }
+ private:
+  int prev_device_;
+};
+}  // namespace ffi
+}  // namespace tvm
+#else
+#include <tvm/ffi/extra/cuda/device_guard.h>
+#endif
 
 #include "dlpack/dlpack.h"
 

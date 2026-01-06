@@ -16,8 +16,13 @@
 #ifndef FLASHINFER_MATH_CUH_
 #define FLASHINFER_MATH_CUH_
 
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#else
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#endif
 
 #include <cstdint>
 
@@ -40,9 +45,13 @@ __forceinline__ __device__ uint32_t half2_as_uint32(half2 x) { return *(uint32_t
  * \param x input
  */
 __forceinline__ __device__ float ptx_exp2(float x) {
+#ifdef __HIP_PLATFORM_AMD__
+  return __builtin_amdgcn_exp2f(x);
+#else
   float y;
   asm volatile("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
   return y;
+#endif
 }
 
 /*!
@@ -50,9 +59,13 @@ __forceinline__ __device__ float ptx_exp2(float x) {
  * \param x input
  */
 __forceinline__ __device__ float ptx_log2(float x) {
+#ifdef __HIP_PLATFORM_AMD__
+  return __builtin_amdgcn_logf(x) * 1.4426950408889634f; // log(x) * log2(e)
+#else
   float y;
   asm volatile("lg2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
   return y;
+#endif
 }
 
 /*!
@@ -60,10 +73,17 @@ __forceinline__ __device__ float ptx_log2(float x) {
  * \param x input
  */
 __forceinline__ __device__ half2 ptx_exp2(half2 x) {
+#ifdef __HIP_PLATFORM_AMD__
+  float2 f;
+  f.x = __builtin_amdgcn_exp2f(__half2float(x.x));
+  f.y = __builtin_amdgcn_exp2f(__half2float(x.y));
+  return half2(__float2half(f.x), __float2half(f.y));
+#else
   uint32_t y_u32;
   uint32_t x_u32 = half2_as_uint32(x);
   asm volatile("ex2.approx.f16x2 %0, %1;" : "=r"(y_u32) : "r"(x_u32));
   return uint32_as_half2(y_u32);
+#endif
 }
 
 /*!
@@ -71,9 +91,13 @@ __forceinline__ __device__ half2 ptx_exp2(half2 x) {
  * \param x input
  */
 __forceinline__ __device__ half ptx_exp2(half x) {
+#ifdef __HIP_PLATFORM_AMD__
+  return __float2half(__builtin_amdgcn_exp2f(__half2float(x)));
+#else
   ushort y_u16;
   asm volatile("ex2.approx.f16 %0, %1;" : "=h"(y_u16) : "h"(__half_as_ushort(x)));
   return __ushort_as_half(y_u16);
+#endif
 }
 
 /*!
@@ -81,9 +105,13 @@ __forceinline__ __device__ half ptx_exp2(half x) {
  * \param x input
  */
 __forceinline__ __device__ float ptx_rcp(float x) {
+#ifdef __HIP_PLATFORM_AMD__
+  return __builtin_amdgcn_rcpf(x);
+#else
   float y;
   asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
   return y;
+#endif
 }
 
 /*!
@@ -93,11 +121,15 @@ __forceinline__ __device__ float ptx_rcp(float x) {
  * \param lane_mask The mask to perform thread index xor with: y[i] <- x[i ^ delta]
  */
 __forceinline__ __device__ float shfl_xor_sync(float x, int lane_mask) {
+#ifdef __HIP_PLATFORM_AMD__
+  return __shfl_xor(x, lane_mask);
+#else
   float y;
   asm volatile("shfl.sync.bfly.b32 %0, %1, %2, 0x1f, 0xffffffff;"
                : "=f"(y)
                : "f"(x), "r"(lane_mask));
   return y;
+#endif
 }
 
 /*!
@@ -107,7 +139,11 @@ __forceinline__ __device__ float shfl_xor_sync(float x, int lane_mask) {
  * \param lane_mask The mask to perform thread index xor with: y[i] <- x[i ^ lane_mask]
  */
 __forceinline__ __device__ half2 shfl_xor_sync(half2 x, int lane_mask) {
+#ifdef __HIP_PLATFORM_AMD__
+  return __shfl_xor(x, lane_mask);
+#else
   return __shfl_xor_sync(0xffffffff, x, lane_mask);
+#endif
 }
 
 /*!
@@ -115,9 +151,13 @@ __forceinline__ __device__ half2 shfl_xor_sync(half2 x, int lane_mask) {
  * \param x input
  */
 __forceinline__ __device__ float rsqrt(float x) {
+#ifdef __HIP_PLATFORM_AMD__
+  return __builtin_amdgcn_rsqf(x);
+#else
   float y;
   asm volatile("rsqrt.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
   return y;
+#endif
 }
 
 /*!
@@ -125,9 +165,13 @@ __forceinline__ __device__ float rsqrt(float x) {
  * \param x input
  */
 __forceinline__ __device__ float tanh(float x) {
+#ifdef __HIP_PLATFORM_AMD__
+  return tanhf(x);
+#else
   float y;
   asm volatile("tanh.approx.f32 %0, %1;" : "=f"(y) : "f"(x));
   return y;
+#endif
 }
 
 /*!
@@ -135,10 +179,17 @@ __forceinline__ __device__ float tanh(float x) {
  * \param x input
  */
 __forceinline__ __device__ half2 tanh(half2 x) {
+#ifdef __HIP_PLATFORM_AMD__
+  float2 f;
+  f.x = tanhf(__half2float(x.x));
+  f.y = tanhf(__half2float(x.y));
+  return half2(__float2half(f.x), __float2half(f.y));
+#else
   uint32_t y_u32;
   uint32_t x_u32 = half2_as_uint32(x);
   asm volatile("tanh.approx.f16x2 %0, %1;" : "=r"(y_u32) : "r"(x_u32));
   return uint32_as_half2(y_u32);
+#endif
 }
 
 /*!
@@ -146,9 +197,13 @@ __forceinline__ __device__ half2 tanh(half2 x) {
  * \param x input
  */
 __forceinline__ __device__ half tanh(half x) {
+#ifdef __HIP_PLATFORM_AMD__
+  return __float2half(tanhf(__half2float(x)));
+#else
   ushort y_u16;
   asm volatile("tanh.approx.f16 %0, %1;" : "=h"(y_u16) : "h"(__half_as_ushort(x)));
   return __ushort_as_half(y_u16);
+#endif
 }
 
 }  // namespace math

@@ -19,6 +19,30 @@
 #include <cstdint>
 #include <numeric>
 
+// HIP/ROCm compatibility for norm kernel
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+// PDL (Programmatic Dependent Launch) is not supported on HIP
+#define FLASHINFER_NORM_PDL_SUPPORTED 0
+// CUDA to HIP API mappings
+using cudaStream_t = hipStream_t;
+using cudaError_t = hipError_t;
+#define cudaSuccess hipSuccess
+// hipFuncSetAttribute takes const void* so we need a wrapper
+template <typename F>
+inline hipError_t cudaFuncSetAttribute(F func, hipFuncAttribute attr, int val) {
+  return hipFuncSetAttribute((const void*)func, attr, val);
+}
+#define cudaFuncAttributeMaxDynamicSharedMemorySize hipFuncAttributeMaxDynamicSharedMemorySize
+#define cudaOccupancyMaxActiveBlocksPerMultiprocessor hipOccupancyMaxActiveBlocksPerMultiprocessor
+#define cudaGetDevice hipGetDevice
+#define cudaDeviceGetAttribute hipDeviceGetAttribute
+#define cudaDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
+#define cudaGetLastError hipGetLastError
+#else
+#define FLASHINFER_NORM_PDL_SUPPORTED 1
+#endif
+
 #include "flashinfer/trtllm/common/cudaTypeUtils.cuh"
 #include "flashinfer/trtllm/common/cudaUtils.h"
 #include "flashinfer/trtllm/common/reduceKernelUtils.cuh"
@@ -124,6 +148,7 @@ cudaError_t RMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint32_
   float weight_bias = 0.f;
   void* args[] = {&input, &weight, &output, &d, &stride_input, &stride_output, &weight_bias, &eps};
 
+#if FLASHINFER_NORM_PDL_SUPPORTED
   cudaLaunchConfig_t config;
   config.gridDim = nblks;
   config.blockDim = nthrs;
@@ -142,6 +167,17 @@ cudaError_t RMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint32_
     FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, weight, output, d, stride_input,
                                             stride_output, weight_bias, eps));
   });
+#else
+  // HIP: Use standard kernel launch without PDL
+  DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
+    auto kernel = RMSNormKernel<VEC_SIZE, T>;
+    FLASHINFER_CUDA_CALL(
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+    kernel<<<nblks, nthrs, smem_size, stream>>>(input, weight, output, d, stride_input,
+                                                 stride_output, weight_bias, eps);
+    FLASHINFER_CUDA_CALL(cudaGetLastError());
+  });
+#endif
   return cudaSuccess;
 }
 
@@ -239,6 +275,7 @@ cudaError_t RMSNormQuant(T* input, T* weight, O* output, uint32_t batch_size, ui
   const uint32_t smem_size = num_warps * sizeof(float);
   float weight_bias = 0.f;
 
+#if FLASHINFER_NORM_PDL_SUPPORTED
   cudaLaunchConfig_t config;
   config.gridDim = nblks;
   config.blockDim = nthrs;
@@ -257,6 +294,16 @@ cudaError_t RMSNormQuant(T* input, T* weight, O* output, uint32_t batch_size, ui
     FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, weight, output, d, stride_input,
                                             stride_output, weight_bias, scale, eps));
   });
+#else
+  DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
+    auto kernel = RMSNormQuantKernel<VEC_SIZE, T, O>;
+    FLASHINFER_CUDA_CALL(
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+    kernel<<<nblks, nthrs, smem_size, stream>>>(input, weight, output, d, stride_input,
+                                                 stride_output, weight_bias, scale, eps);
+    FLASHINFER_CUDA_CALL(cudaGetLastError());
+  });
+#endif
   return cudaSuccess;
 }
 
@@ -350,15 +397,6 @@ cudaError_t QKRMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint3
 
   float weight_bias = 0.f;
 
-  cudaLaunchConfig_t config;
-  config.dynamicSmemBytes = smem_size;
-  config.stream = stream;
-  cudaLaunchAttribute attrs[1];
-  attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attrs[0].val.programmaticStreamSerializationAllowed = enable_pdl;
-  config.numAttrs = 1;
-  config.attrs = attrs;
-
   DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
     auto kernel = QKRMSNormKernel<VEC_SIZE, T>;
 
@@ -372,13 +410,27 @@ cudaError_t QKRMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint3
     const int needed_blocks = ceil_div(batch_size * num_heads, num_warps);
     dim3 nblks(std::min(num_blocks_per_sm * num_sms, needed_blocks));
     dim3 nthrs(32, num_warps);
+
+#if FLASHINFER_NORM_PDL_SUPPORTED
+    cudaLaunchConfig_t config;
+    config.dynamicSmemBytes = smem_size;
+    config.stream = stream;
+    cudaLaunchAttribute attrs[1];
+    attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attrs[0].val.programmaticStreamSerializationAllowed = enable_pdl;
+    config.numAttrs = 1;
+    config.attrs = attrs;
     config.gridDim = nblks;
     config.blockDim = nthrs;
-
-    // execute kernel
     FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, weight, output, d, batch_size,
                                             num_heads, stride_input_n, stride_input_h,
                                             stride_output_n, stride_output_h, weight_bias, eps));
+#else
+    kernel<<<nblks, nthrs, smem_size, stream>>>(input, weight, output, d, batch_size,
+                                                num_heads, stride_input_n, stride_input_h,
+                                                stride_output_n, stride_output_h, weight_bias, eps);
+    FLASHINFER_CUDA_CALL(cudaGetLastError());
+#endif
   });
   return cudaSuccess;
 }
@@ -491,6 +543,7 @@ cudaError_t FusedAddRMSNorm(T* input, T* residual, T* weight, uint32_t batch_siz
   void* args[] = {&input,        &residual,        &weight,      &d,
                   &stride_input, &stride_residual, &weight_bias, &eps};
 
+#if FLASHINFER_NORM_PDL_SUPPORTED
   cudaLaunchConfig_t config;
   config.gridDim = nblks;
   config.blockDim = nthrs;
@@ -509,6 +562,16 @@ cudaError_t FusedAddRMSNorm(T* input, T* residual, T* weight, uint32_t batch_siz
     FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, residual, weight, d,
                                             stride_input, stride_residual, weight_bias, eps));
   });
+#else
+  DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
+    auto kernel = FusedAddRMSNormKernel<VEC_SIZE, T>;
+    FLASHINFER_CUDA_CALL(
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+    kernel<<<nblks, nthrs, smem_size, stream>>>(input, residual, weight, d,
+                                                stride_input, stride_residual, weight_bias, eps);
+    FLASHINFER_CUDA_CALL(cudaGetLastError());
+  });
+#endif
 
   return cudaSuccess;
 }
@@ -624,6 +687,7 @@ cudaError_t FusedAddRMSNormQuant(T* input, T* residual, T* weight, O* output, ui
   const uint32_t smem_size = (ceil_div(num_warps, 4) * 4 + d) * sizeof(float);
   float weight_bias = 0.f;
 
+#if FLASHINFER_NORM_PDL_SUPPORTED
   cudaLaunchConfig_t config;
   config.gridDim = nblks;
   config.blockDim = nthrs;
@@ -643,6 +707,17 @@ cudaError_t FusedAddRMSNormQuant(T* input, T* residual, T* weight, O* output, ui
                                             stride_input, stride_residual, stride_output,
                                             weight_bias, scale, eps));
   });
+#else
+  DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
+    auto kernel = FusedAddRMSNormQuantKernel<VEC_SIZE, T, O>;
+    FLASHINFER_CUDA_CALL(
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+    kernel<<<nblks, nthrs, smem_size, stream>>>(input, residual, weight, output, d,
+                                                stride_input, stride_residual, stride_output,
+                                                weight_bias, scale, eps);
+    FLASHINFER_CUDA_CALL(cudaGetLastError());
+  });
+#endif
 
   return cudaSuccess;
 }
@@ -661,6 +736,7 @@ cudaError_t GemmaRMSNorm(T* input, T* weight, T* output, uint32_t batch_size, ui
   float weight_bias = 1.f;
   void* args[] = {&input, &weight, &output, &d, &stride_input, &stride_output, &weight_bias, &eps};
 
+#if FLASHINFER_NORM_PDL_SUPPORTED
   cudaLaunchConfig_t config;
   config.gridDim = nblks;
   config.blockDim = nthrs;
@@ -679,6 +755,16 @@ cudaError_t GemmaRMSNorm(T* input, T* weight, T* output, uint32_t batch_size, ui
     FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, weight, output, d, stride_input,
                                             stride_output, weight_bias, eps));
   });
+#else
+  DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
+    auto kernel = RMSNormKernel<VEC_SIZE, T>;
+    FLASHINFER_CUDA_CALL(
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+    kernel<<<nblks, nthrs, smem_size, stream>>>(input, weight, output, d, stride_input,
+                                                stride_output, weight_bias, eps);
+    FLASHINFER_CUDA_CALL(cudaGetLastError());
+  });
+#endif
   return cudaSuccess;
 }
 
@@ -698,6 +784,7 @@ cudaError_t GemmaFusedAddRMSNorm(T* input, T* residual, T* weight, uint32_t batc
   void* args[] = {&input,        &residual,        &weight,      &d,
                   &stride_input, &stride_residual, &weight_bias, &eps};
 
+#if FLASHINFER_NORM_PDL_SUPPORTED
   cudaLaunchConfig_t config;
   config.gridDim = nblks;
   config.blockDim = nthrs;
@@ -716,6 +803,16 @@ cudaError_t GemmaFusedAddRMSNorm(T* input, T* residual, T* weight, uint32_t batc
     FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, residual, weight, d,
                                             stride_input, stride_residual, weight_bias, eps));
   });
+#else
+  DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
+    auto kernel = FusedAddRMSNormKernel<VEC_SIZE, T>;
+    FLASHINFER_CUDA_CALL(
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+    kernel<<<nblks, nthrs, smem_size, stream>>>(input, residual, weight, d,
+                                                stride_input, stride_residual, weight_bias, eps);
+    FLASHINFER_CUDA_CALL(cudaGetLastError());
+  });
+#endif
 
   return cudaSuccess;
 }

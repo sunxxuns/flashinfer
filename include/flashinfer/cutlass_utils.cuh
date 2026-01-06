@@ -16,7 +16,16 @@
 #ifndef FLASHINFER_CUTLASS_UTILS_CUH_
 #define FLASHINFER_CUTLASS_UTILS_CUH_
 
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#include <hip/hip_bfloat16.h>
+#if __has_include(<hip/hip_fp8.h>)
+#include <hip/hip_fp8.h>
+#endif
+#else
 #include <cuda_fp8.h>
+#endif
 
 #include "cute/tensor.hpp"
 #include "cutlass/cutlass.h"

@@ -22,11 +22,26 @@
 // #include "tensorrt_llm/common/logger.h"
 // #include "tensorrt_llm/common/tllmException.h"
 
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+// HIP doesn't have cuBLAS - GEMM operations use different paths on AMD
+// CUDA to HIP type/function aliases
+using cudaStream_t = hipStream_t;
+using cudaError_t = hipError_t;
+using cudaStreamCaptureStatus = hipStreamCaptureStatus;
+#define cudaStreamIsCapturing hipStreamIsCapturing
+#define cudaStreamSynchronize hipStreamSynchronize
+#define cudaGetLastError hipGetLastError
+#define cudaGetErrorString hipGetErrorString
+#define cudaSuccess hipSuccess
+#define cudaStreamCaptureStatusActive hipStreamCaptureStatusActive
+#else
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <driver_types.h>
+#endif
 
 #include <algorithm>
 #include <cassert>

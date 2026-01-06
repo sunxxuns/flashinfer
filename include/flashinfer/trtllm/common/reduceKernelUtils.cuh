@@ -17,6 +17,17 @@
 #include <assert.h>
 
 #include <array>
+#include <float.h>
+#include <type_traits>
+
+#ifdef __HIP_PLATFORM_AMD__
+// HIP cooperative groups and runtime
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#include <hip/hip_cooperative_groups.h>
+// Note: hiprand not needed for reduce operations in norm kernel
+#else
+// CUDA cooperative groups
 #if ((__CUDACC_VER_MAJOR__ > 11) || (__CUDACC_VER_MAJOR__ == 11 && __CUDACC_VER_MINOR__ >= 0))
 #include <cooperative_groups/reduce.h>
 #else
@@ -25,9 +36,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
-#include <float.h>
-
-#include <type_traits>
+#endif
 
 #include "flashinfer/trtllm/common/cudaTypeUtils.cuh"
 
@@ -74,7 +83,12 @@ __device__ inline void copy(void const* local, void* data) {
 }
 
 static float constexpr HALF_FLT_MAX = 65504.F;
+#ifdef __HIP_PLATFORM_AMD__
+// HIP AMD requires 64-bit mask for warp shuffle functions
+#define FINAL_MASK 0xffffffffffffffffULL
+#else
 #define FINAL_MASK 0xffffffff
+#endif
 
 template <typename T>
 __inline__ __device__ T warpReduceSum(T val) {

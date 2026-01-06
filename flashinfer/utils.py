@@ -366,7 +366,11 @@ else:
 
 def determine_gemm_backend(device: torch.device) -> str:
     major, _ = get_compute_capability(device)
-    if major == 9 and torch.version.cuda >= "12.3":
+    # Handle HIP/ROCm - torch.version.cuda is None on AMD
+    if torch.version.hip is not None:
+        # AMD GPUs use SM80-style backend (no SM90 equivalent yet)
+        return "sm80"
+    if major == 9 and torch.version.cuda is not None and torch.version.cuda >= "12.3":
         return "sm90"
     else:
         return "sm80"

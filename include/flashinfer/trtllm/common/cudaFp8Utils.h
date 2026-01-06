@@ -17,8 +17,29 @@
 #pragma once
 
 #ifdef ENABLE_FP8
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#if __has_include(<hip/hip_fp8.h>)
+#include <hip/hip_fp8.h>
+#endif
+// HIP compatibility: define __CUDA_ALIGN__ macro if not present
+#ifndef __CUDA_ALIGN__
+#define __CUDA_ALIGN__(n) __attribute__((aligned(n)))
+#endif
+// CUDA to HIP type alias
+using cudaStream_t = hipStream_t;
+// FP8 type aliases - use native HIP FP8 types
+using __nv_fp8_e4m3 = __hip_fp8_e4m3;
+using __nv_fp8_e5m2 = __hip_fp8_e5m2;
+using __nv_fp8x2_e4m3 = __hip_fp8x2_e4m3;
+using __nv_fp8x2_e5m2 = __hip_fp8x2_e5m2;
+using __nv_fp8x4_e4m3 = __hip_fp8x4_e4m3;
+using __nv_fp8x4_e5m2 = __hip_fp8x4_e5m2;
+#else
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#endif
 #include <stdint.h>
 
 #define FP8_MHA

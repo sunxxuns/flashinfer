@@ -41,7 +41,46 @@ def _get_glibcxx_abi_build_flags() -> List[str]:
 
 
 @functools.cache
+def is_hip() -> bool:
+    """Check if we're on a HIP/ROCm platform."""
+    return torch.version.hip is not None
+
+
+@functools.cache
+def get_rocm_path() -> str:
+    """Get the ROCm installation path."""
+    rocm_home = os.environ.get("ROCM_HOME") or os.environ.get("HIP_PATH")
+    if rocm_home is not None:
+        return rocm_home
+    # Try to find hipcc
+    hipcc_path = subprocess.run(["which", "hipcc"], capture_output=True)
+    if hipcc_path.returncode == 0:
+        rocm_home = os.path.dirname(
+            os.path.dirname(hipcc_path.stdout.decode("utf-8").strip())
+        )
+    else:
+        rocm_home = "/opt/rocm"
+        if not os.path.exists(rocm_home):
+            raise RuntimeError(
+                f"Could not find hipcc and default {rocm_home=} doesn't exist"
+            )
+    return rocm_home
+
+
+@functools.cache
+def get_rocm_version() -> Version:
+    """Get the ROCm version."""
+    if torch.version.hip is not None:
+        # Parse version from torch.version.hip (e.g., "6.0.32830-d62f6a171")
+        hip_version = torch.version.hip.split("-")[0].split(".")[:2]
+        return Version(".".join(hip_version))
+    raise RuntimeError("ROCm/HIP not available")
+
+
+@functools.cache
 def get_cuda_path() -> str:
+    if is_hip():
+        return get_rocm_path()
     cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if cuda_home is not None:
         return cuda_home
@@ -62,6 +101,8 @@ def get_cuda_path() -> str:
 
 @functools.cache
 def get_cuda_version() -> Version:
+    if is_hip():
+        return get_rocm_version()
     # Try to query nvcc for CUDA version; if nvcc is unavailable, fall back to torch.version.cuda
     try:
         cuda_home = get_cuda_path()
@@ -151,11 +192,68 @@ def build_cflags(
     return cflags
 
 
+def _is_nvcc_only_flag(flag: str) -> bool:
+    """Check if a flag is NVCC-specific and should be filtered for HIP."""
+    nvcc_only_patterns = [
+        "-gencode",
+        "--expt-",
+        "--compiler-options",
+        "--threads",
+        "-use_fast_math",  # Use -ffast-math instead for HIP
+        "-Xcompiler",
+        "-Xlinker",
+        "-ccbin",
+        "--generate-dependencies",
+        "--dependency-output",
+        "-static-global-template-stub",
+        "-maxrregcount",
+    ]
+    for pattern in nvcc_only_patterns:
+        if pattern in flag:
+            return True
+    return False
+
+
+def build_hip_cflags(
+    common_cflags: List[str],
+    extra_cuda_cflags: Optional[List[str]] = None,
+) -> List[str]:
+    """Build HIP compilation flags."""
+    hip_cflags: List[str] = [
+        "$common_cflags",
+        "-fPIC",
+        "-D__HIP_PLATFORM_AMD__",
+        "-std=c++17",
+        "-ffast-math",
+    ]
+
+    # AMD architectures - gfx908 (MI100), gfx90a (MI200), gfx942 (MI300)
+    hip_arch_flags = ["--offload-arch=gfx908", "--offload-arch=gfx90a", "--offload-arch=gfx942"]
+    hip_cflags += hip_arch_flags
+
+    if extra_cuda_cflags is not None:
+        # Filter out NVIDIA-specific flags
+        for flag in extra_cuda_cflags:
+            if not _is_nvcc_only_flag(flag):
+                hip_cflags.append(flag)
+
+    env_extra_cuda_cflags = parse_env_flags("FLASHINFER_EXTRA_CUDAFLAGS")
+    if env_extra_cuda_cflags is not None:
+        for flag in env_extra_cuda_cflags:
+            if not _is_nvcc_only_flag(flag):
+                hip_cflags.append(flag)
+
+    return hip_cflags
+
+
 def build_cuda_cflags(
     common_cflags: List[str],
     extra_cuda_cflags: Optional[List[str]] = None,
 ) -> List[str]:
     """Build CUDA compilation flags."""
+    if is_hip():
+        return build_hip_cflags(common_cflags, extra_cuda_cflags)
+
     cuda_cflags: List[str] = []
     cc_env = os.environ.get("CC")
     if cc_env is not None:
@@ -214,13 +312,20 @@ def generate_ninja_build_for_op(
     cflags = build_cflags(common_cflags, extra_cflags)
     cuda_cflags = build_cuda_cflags(common_cflags, extra_cuda_cflags)
 
-    ldflags = [
-        "-shared",
-        "-L$cuda_home/lib64",
-        "-L$cuda_home/lib64/stubs",
-        "-lcudart",
-        "-lcuda",
-    ]
+    if is_hip():
+        ldflags = [
+            "-shared",
+            "-L$cuda_home/lib",
+            "-lamdhip64",
+        ]
+    else:
+        ldflags = [
+            "-shared",
+            "-L$cuda_home/lib64",
+            "-L$cuda_home/lib64/stubs",
+            "-lcudart",
+            "-lcuda",
+        ]
 
     env_extra_ldflags = parse_env_flags("FLASHINFER_EXTRA_LDFLAGS")
     if env_extra_ldflags is not None:
@@ -230,7 +335,10 @@ def generate_ninja_build_for_op(
         ldflags += extra_ldflags
 
     cxx = os.environ.get("CXX", "c++")
-    nvcc = os.environ.get("FLASHINFER_NVCC", "$cuda_home/bin/nvcc")
+    if is_hip():
+        nvcc = os.environ.get("FLASHINFER_HIPCC", "$cuda_home/bin/hipcc")
+    else:
+        nvcc = os.environ.get("FLASHINFER_NVCC", "$cuda_home/bin/nvcc")
 
     lines = [
         "ninja_required_version = 1.3",
@@ -251,12 +359,25 @@ def generate_ninja_build_for_op(
         "  depfile = $out.d",
         "  deps = gcc",
         "",
-        "rule cuda_compile",
-        "  command = $nvcc --generate-dependencies-with-compile --dependency-output $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags",
-        "  depfile = $out.d",
-        "  deps = gcc",
-        "",
     ]
+
+    if is_hip():
+        # HIP uses hipcc which accepts different flags for dependencies
+        lines.extend([
+            "rule cuda_compile",
+            "  command = $nvcc -MMD -MF $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags",
+            "  depfile = $out.d",
+            "  deps = gcc",
+            "",
+        ])
+    else:
+        lines.extend([
+            "rule cuda_compile",
+            "  command = $nvcc --generate-dependencies-with-compile --dependency-output $out.d $cuda_cflags -c $in -o $out $cuda_post_cflags",
+            "  depfile = $out.d",
+            "  deps = gcc",
+            "",
+        ])
 
     # Add nvcc linking rule for device code
     if needs_device_linking:

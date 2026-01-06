@@ -15,11 +15,35 @@
  */
 #ifndef FLASHINFER_UTILS_CUH_
 #define FLASHINFER_UTILS_CUH_
+
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#include <hip/amd_detail/amd_hip_bf16.h>
+// HIP compatibility macros
+#define cudaError_t hipError_t
+#define cudaSuccess hipSuccess
+#define cudaGetErrorString hipGetErrorString
+#define cudaMemcpy hipMemcpy
+#define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
+#define cudaMemcpyHostToDevice hipMemcpyHostToDevice
+#define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
+#define cudaDeviceProp hipDeviceProp_t
+#define cudaGetDeviceProperties hipGetDeviceProperties
+#define cudaDeviceGetAttribute hipDeviceGetAttribute
+#define cudaDevAttrComputeCapabilityMajor hipDeviceAttributeComputeCapabilityMajor
+#define cudaDevAttrComputeCapabilityMinor hipDeviceAttributeComputeCapabilityMinor
+#define cudaGetDevice hipGetDevice
+#define cudaSetDevice hipSetDevice
+using __nv_bfloat16 = __hip_bfloat16;
+using __nv_bfloat162 = __hip_bfloat162;
+#else
 #include <cuda_bf16.h>
 #include <cuda_device_runtime_api.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#endif
 
 #include <atomic>
 #include <cstdint>
@@ -425,44 +449,64 @@ __device__ __forceinline__ uint32_t sub_if_greater_or_zero(uint32_t x, uint32_t 
 // These are useful for streaming memory access patterns where data is used once
 
 /*!
- * \brief Get the lane ID within a warp (0-31)
+ * \brief Get the lane ID within a warp (0-31 for NVIDIA, 0-63 for AMD)
  */
 __forceinline__ __device__ int get_lane_id() {
+#ifdef __HIP_PLATFORM_AMD__
+  return __lane_id();
+#else
   int lane_id;
   asm("mov.u32 %0, %%laneid;" : "=r"(lane_id));
   return lane_id;
+#endif
 }
 
 /*!
  * \brief Non-atomic global load for int (4 bytes) with cache streaming hint
  */
 __forceinline__ __device__ int ld_na_global_v1(const int* addr) {
+#ifdef __HIP_PLATFORM_AMD__
+  return *addr;  // HIP: standard load
+#else
   int val;
   asm volatile("ld.global.cs.b32 %0, [%1];" : "=r"(val) : "l"(addr));
   return val;
+#endif
 }
 
 /*!
  * \brief Non-atomic global load for int2 (8 bytes) with cache streaming hint
  */
 __forceinline__ __device__ int2 ld_na_global_v2(const int2* addr) {
+#ifdef __HIP_PLATFORM_AMD__
+  return *addr;  // HIP: standard load
+#else
   int2 val;
   asm volatile("ld.global.cs.v2.b32 {%0, %1}, [%2];" : "=r"(val.x), "=r"(val.y) : "l"(addr));
   return val;
+#endif
 }
 
 /*!
  * \brief Non-atomic global store for int (4 bytes) with cache streaming hint
  */
 __forceinline__ __device__ void st_na_global_v1(int* addr, int val) {
+#ifdef __HIP_PLATFORM_AMD__
+  *addr = val;  // HIP: standard store
+#else
   asm volatile("st.global.cs.b32 [%0], %1;" ::"l"(addr), "r"(val));
+#endif
 }
 
 /*!
  * \brief Non-atomic global store for int2 (8 bytes) with cache streaming hint
  */
 __forceinline__ __device__ void st_na_global_v2(int2* addr, int2 val) {
+#ifdef __HIP_PLATFORM_AMD__
+  *addr = val;  // HIP: standard store
+#else
   asm volatile("st.global.cs.v2.b32 [%0], {%1, %2};" ::"l"(addr), "r"(val.x), "r"(val.y));
+#endif
 }
 
 /*!
@@ -470,7 +514,11 @@ __forceinline__ __device__ void st_na_global_v2(int2* addr, int2 val) {
  */
 template <typename T>
 __forceinline__ __device__ void prefetch_L2(const T* addr) {
+#ifdef __HIP_PLATFORM_AMD__
+  (void)addr;  // HIP: no direct prefetch equivalent
+#else
   asm volatile("prefetch.global.L2 [%0];" ::"l"(addr));
+#endif
 }
 
 __device__ __forceinline__ void swap(uint32_t& a, uint32_t& b) {

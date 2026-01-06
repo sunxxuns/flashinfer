@@ -16,7 +16,16 @@
 #ifndef FLASHINFER_PAGE_CUH_
 #define FLASHINFER_PAGE_CUH_
 
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_runtime.h>
+using cudaStream_t = hipStream_t;
+#define cudaLaunchKernel hipLaunchKernel
+#define cudaDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
+#define cudaDeviceGetAttribute hipDeviceGetAttribute
+#define cudaGetDevice hipGetDevice
+#else
 #include <driver_types.h>
+#endif
 
 #include <vector>
 

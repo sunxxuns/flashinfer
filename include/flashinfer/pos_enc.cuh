@@ -28,6 +28,16 @@
 #include "utils.cuh"
 #include "vec_dtypes.cuh"
 
+// PDL (Programmatic Dependent Launch) is not supported on HIP
+#ifdef __HIP_PLATFORM_AMD__
+#define FLASHINFER_PDL_SUPPORTED 0
+#define cudaDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
+#define cudaLaunchKernel hipLaunchKernel
+#define cudaOccupancyMaxActiveBlocksPerMultiprocessor hipOccupancyMaxActiveBlocksPerMultiprocessor
+#else
+#define FLASHINFER_PDL_SUPPORTED 1
+#endif
+
 namespace flashinfer {
 
 struct RopeQuantizeAppendPagedKVCacheParams {
@@ -1096,6 +1106,7 @@ cudaError_t RopeQuantize(
     dim3 nblks(nblks_x, total_blocks_y);
     dim3 nthrs(bdx, bdy);
 
+#if FLASHINFER_PDL_SUPPORTED
     cudaLaunchAttribute attribute[1];
     attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     attribute[0].val.programmaticStreamSerializationAllowed = enable_pdl ? 1 : 0;
@@ -1115,6 +1126,10 @@ cudaError_t RopeQuantize(
         k_rope_in_stride, k_rope_in_stride_h, k_nope_in_stride, k_nope_in_stride_h,
         k_rope_out_stride, k_rope_out_stride_h, k_nope_out_stride, k_nope_out_stride_h,
         quant_scale_q, quant_scale_kv));
+#else
+    // HIP: Use standard kernel launch
+    FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, 0, stream));
+#endif
   });
 
   return cudaSuccess;
@@ -1152,17 +1167,6 @@ cudaError_t RopeQuantizeAppendPagedKVCache(
     dim3 nblks(nblks_x, total_blocks_y);
     dim3 nthrs(bdx, bdy);
 
-    cudaLaunchAttribute attribute[1];
-    attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-    attribute[0].val.programmaticStreamSerializationAllowed = enable_pdl ? 1 : 0;
-    cudaLaunchConfig_t config;
-    config.gridDim = nblks;
-    config.blockDim = nthrs;
-    config.stream = stream;
-    config.dynamicSmemBytes = 0;
-    config.attrs = attribute;
-    config.numAttrs = 1;
-
     auto kernel = RopeQuantizeAppendPagedKVCacheKernel<INTERLEAVE, vec_size, /*bdx=*/1, DType,
                                                        RoPEIdType, PagedKVIdType, QuantType,
                                                        paged_kv_t<QuantType, PagedKVIdType>>;
@@ -1189,9 +1193,28 @@ cudaError_t RopeQuantizeAppendPagedKVCache(
     params.quant_scale_q = quant_scale_q;
     params.quant_scale_kv = quant_scale_kv;
 
+#if FLASHINFER_PDL_SUPPORTED
+    cudaLaunchAttribute attribute[1];
+    attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attribute[0].val.programmaticStreamSerializationAllowed = enable_pdl ? 1 : 0;
+    cudaLaunchConfig_t config;
+    config.gridDim = nblks;
+    config.blockDim = nthrs;
+    config.stream = stream;
+    config.dynamicSmemBytes = 0;
+    config.attrs = attribute;
+    config.numAttrs = 1;
+
     FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(
         &config, kernel, q_rope_in, k_rope_in, q_nope_in, k_nope_in, v_in, q_rope_out, q_nope_out,
         paged_kv, batch_indices, positions, cos_sin_cache, pos_ids, params));
+#else
+    void* args[] = {(void*)&q_rope_in, (void*)&k_rope_in, (void*)&q_nope_in, (void*)&k_nope_in,
+                    (void*)&v_in, (void*)&q_rope_out, (void*)&q_nope_out, (void*)&paged_kv,
+                    (void*)&batch_indices, (void*)&positions, (void*)&cos_sin_cache,
+                    (void*)&pos_ids, (void*)&params};
+    FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, 0, stream));
+#endif
   });
 
   return cudaSuccess;
@@ -1227,17 +1250,6 @@ cudaError_t RopeQuantizeAppendPagedMLACache(
     dim3 nblks(nblks_x, total_blocks_y);
     dim3 nthrs(bdx, bdy);
 
-    cudaLaunchAttribute attribute[1];
-    attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-    attribute[0].val.programmaticStreamSerializationAllowed = enable_pdl ? 1 : 0;
-    cudaLaunchConfig_t config;
-    config.gridDim = nblks;
-    config.blockDim = nthrs;
-    config.stream = stream;
-    config.dynamicSmemBytes = 0;
-    config.attrs = attribute;
-    config.numAttrs = 1;
-
     auto kernel = RopeQuantizeAppendPagedKVCacheKernel<INTERLEAVE, vec_size, /*bdx=*/1, DType,
                                                        RoPEIdType, PagedKVIdType, QuantType,
                                                        paged_kv_mla_t<QuantType, PagedKVIdType>>;
@@ -1268,6 +1280,18 @@ cudaError_t RopeQuantizeAppendPagedMLACache(
     params.quant_scale_q = quant_scale_q;
     params.quant_scale_kv = quant_scale_kv;
 
+#if FLASHINFER_PDL_SUPPORTED
+    cudaLaunchAttribute attribute[1];
+    attribute[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attribute[0].val.programmaticStreamSerializationAllowed = enable_pdl ? 1 : 0;
+    cudaLaunchConfig_t config;
+    config.gridDim = nblks;
+    config.blockDim = nthrs;
+    config.stream = stream;
+    config.dynamicSmemBytes = 0;
+    config.attrs = attribute;
+    config.numAttrs = 1;
+
     FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel,
                                             // inputs
                                             q_rope_in, k_rope_in, q_nope_in, k_nope_in,
@@ -1280,6 +1304,13 @@ cudaError_t RopeQuantizeAppendPagedMLACache(
                                             cos_sin_cache, pos_ids,
                                             // params
                                             params));
+#else
+    void* args[] = {(void*)&q_rope_in, (void*)&k_rope_in, (void*)&q_nope_in, (void*)&k_nope_in,
+                    (void*)&v_in_nullptr, (void*)&q_rope_out, (void*)&q_nope_out,
+                    (void*)&paged_kv_mla, (void*)&batch_indices, (void*)&positions,
+                    (void*)&cos_sin_cache, (void*)&pos_ids, (void*)&params};
+    FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, 0, stream));
+#endif
   });
 
   return cudaSuccess;
